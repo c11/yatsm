@@ -1,7 +1,7 @@
-yatsm.cymasking module
+yatsm.phenology module
 ======================
 
-.. automodule:: yatsm.cymasking
+.. automodule:: yatsm.phenology
     :members:
     :undoc-members:
     :show-inheritance:

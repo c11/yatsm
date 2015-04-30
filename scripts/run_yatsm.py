@@ -13,6 +13,7 @@ Algorithm options:
     --retrain_time=<n>      Wait <n> days to update model [default: 365.25]
     --screening=<method>    Multi-temporal screening method [default: RLM]
     --screening_crit=<t>    Screening critical value [default: 400.0]
+    --remove_noise          Remove noise during monitoring
     --dynamic_rmse          Vary RMSE as a function of day of year
     --lassocv               Use sklearn cross-validated LassoLarsIC
     --reverse               Run timeseries in reverse
@@ -21,6 +22,7 @@ Algorithm options:
     --omit_crit=<crit>      Critical value for omission test
     --omit_behavior=<b>     Omission test behavior [default: ALL]
     --omit_indices=<b>      Image indices used in omission test
+    --pheno                 Predict phenology metrics using default parameters
 
 Plotting options:
     --plot_index=<b>        Index of band to plot for diagnostics
@@ -58,9 +60,10 @@ from docopt import docopt
 
 import brewer2mpl
 import matplotlib.pyplot as plt
+import matplotlib as mpl
 import numpy as np
 
-# Handle runnin as installed module or not
+# Handle running as installed module or not
 try:
     from yatsm.version import __version__
 except ImportError:
@@ -71,6 +74,8 @@ except ImportError:
 from yatsm.utils import make_X
 from yatsm.reader import find_stack_images, read_pixel_timeseries
 from yatsm.yatsm import YATSM
+
+import sklearn.linear_model
 
 # Some constants
 ndays = 365.25
@@ -119,7 +124,7 @@ def plot_dataset():
 
 def plot_results():
     # Add in deleted obs
-    deleted = ~np.in1d(Y[plot_index, :], yatsm.Y[plot_index, :])
+    deleted = np.in1d(X[:, 1], yatsm.X[:, 1], invert=True)
 
     plot_dataset()
     plt.plot(dates[deleted], Y[plot_index, deleted], 'ro')
@@ -145,6 +150,14 @@ def plot_results():
 
         plt.plot(mx_date, my, fit_colors[i])
 
+        idx = np.where((yatsm.X[:, 1] >= r['start']) & (yatsm.X[:, 1] <= r['end']))[0]
+        sklearn_lasso = sklearn.linear_model.Lasso(alpha=20).fit(yatsm.X[idx, :], yatsm.Y[plot_index, idx])
+
+        plt.plot(mx_date, sklearn_lasso.predict(make_X(mx, freq).T), fit_colors[i], ls='dashed', lw=3)
+
+        # from IPython.core.debugger import Pdb
+        # Pdb().set_trace()
+
         if r['break'] != 0:
             break_date = dt.fromordinal(int(r['break']))
             break_i = np.where(X[:, 1] == r['break'])[0]
@@ -156,6 +169,49 @@ def plot_results():
             plt.vlines(break_date, _plot_ylim[0], _plot_ylim[1], 'r')
             plt.plot(break_date, Y[plot_index, break_i],
                      'ro', mec='r', mfc='none', ms=10, mew=5)
+
+
+def plot_phenology():
+    if not plot_ylim:
+        _plot_ylim = (Y[plot_index, :].min(), Y[plot_index, :].max())
+    else:
+        _plot_ylim = plot_ylim
+
+    # Break up into year/doy
+    yeardoy = pheno.ordinal2yeardoy(yatsm.X[:, 1].astype(np.uint32))
+
+    # Plot predicted pheno
+    repeat = int(math.ceil(len(yatsm.record) / 9.0))
+    fit_colors = brewer2mpl.get_map(
+        'set1', 'qualitative', 9).hex_colors * repeat
+
+    for i, r in enumerate(yatsm.record):
+        # Plot data within record
+        index = np.where((yatsm.X[:, 1] >= r['start']) &
+                         (yatsm.X[:, 1] <= r['end']))
+        plt.scatter(yeardoy[index, 1], yatsm.Y[plot_index, index],
+                    c=fit_colors[i])
+
+        # Plot spline'd EVI scaled to min/max of plot
+        scaled_evi = (r['spline_evi'] * (_plot_ylim[1] - _plot_ylim[0]))
+        plt.plot(np.arange(1, 366), scaled_evi, color=fit_colors[i],
+                 ls='-')
+
+        plt.vlines(r['spring_doy'], _plot_ylim[0], _plot_ylim[1],
+                   fit_colors[i], linestyles='dashed', lw=3)
+        plt.vlines(r['autumn_doy'], _plot_ylim[0], _plot_ylim[1],
+                   fit_colors[i], linestyles='dashdot', lw=3)
+
+        print('Segment {i}:')
+        print('    spring: {d}'.format(i=i, d=r['spring_doy']))
+        print('    autumn: {d}'.format(i=i, d=r['autumn_doy']))
+        print('    correlation: {d}'.format(i=i, d=r['pheno_cor']))
+        print('    # observatiosn: {n}'.format(n=r['pheno_nobs']))
+
+    plt.xlim(0, 366)
+    plt.ylim(plot_ylim)
+    plt.ylabel('Band {i}'.format(i=plot_index + 1))
+    plt.xlabel('Day of Year')
 
 
 if __name__ == '__main__':
@@ -197,6 +253,7 @@ if __name__ == '__main__':
     if screening not in YATSM.screening_types:
         raise TypeError('Unknown multi-temporal cloud screening type')
     screening_crit = float(args['--screening_crit'])
+    remove_noise = args['--remove_noise']
 
     dynamic_rmse = args['--dynamic_rmse']
 
@@ -291,6 +348,7 @@ if __name__ == '__main__':
                   retrain_time=retrain_time,
                   screening=screening,
                   screening_crit=screening_crit,
+                  remove_noise=remove_noise,
                   dynamic_rmse=dynamic_rmse,
                   lassocv=lassocv,
                   logger=logger)
@@ -330,8 +388,23 @@ if __name__ == '__main__':
             with style_context:
                 plot_results()
                 plt.tight_layout()
-                plt.title('Modeled Timeseries')
+                plt.title('Modeled Timeseries (with commission test)')
                 plt.show()
+
+    if args['--pheno']:
+        import yatsm.phenology as pheno
+        yatsm.record = pheno.LongTermMeanPhenology(yatsm).fit()
+
+        # Renew the generator for style
+        if plot_style == 'xkcd':
+            style_context = plt.xkcd()
+        else:
+            style_context = plt.style.context(plot_style)
+        with style_context:
+            plot_phenology()
+            plt.tight_layout()
+            plt.title('Modeled Phenology')
+            plt.show()
 
     if omission_crit:
         print('Omission test (alpha = {a}):'.format(a=omission_crit))

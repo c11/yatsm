@@ -18,9 +18,6 @@ from regression.glmnet_fit import GLMLasso
 from regression import robust_fit as rlm
 from utils import date2index
 
-# Some constants
-ndays = 365.25
-
 
 class YATSM(object):
     """Initialize a YATSM model for data X (spectra) and Y (dates)
@@ -56,6 +53,8 @@ class YATSM(object):
       dynamic_rmse (bool, optional): Vary RMSE as a function of day of year (
         default: False)
       lassocv (bool, optional): Use scikit-learn LarsLassoCV over glmnet
+      design_info (patsy.DesignInfo, optional): design information for X, if
+        X is created using Patsy
       px (int, optional): X (column) pixel reference
       py (int, optional): Y (row) pixel reference
       logger (logging.Logger, optional): Specific logger to use, else get one
@@ -74,7 +73,7 @@ class YATSM(object):
                  green_band=green_band, swir1_band=swir1_band,
                  remove_noise=True, dynamic_rmse=False,
                  lassocv=False,
-                 px=0, py=0,
+                 design_info=None, px=0, py=0,
                  logger=None):
         # Setup logger
         self.logger = logger or logging.getLogger('yatsm')
@@ -91,6 +90,15 @@ class YATSM(object):
         # Store data
         self.X = X
         self.Y = Y
+
+        # Find column index of X containing date from Patsy
+        if design_info:
+            self.design_info = design_info
+            if 'x' not in design_info.term_name_slices.keys():
+                raise AttributeError('Design info must specify "x" (slope)')
+            self._jx = design_info.term_name_slices['x'].start
+        else:
+            self._jx = 1
 
         # Default fitted and tested indices to all, except last band
         if fit_indices is None:
@@ -217,8 +225,8 @@ class YATSM(object):
           alpha (float): significance level for F-statistic (default: 0.01)
 
         Returns:
-          list: updated copy of `self.models` with spurrious models combined
-            into unified model
+          np.ndarray: updated copy of `self.models` with spurious models
+            combined into unified model
 
         """
         if self.record.size == 1:
@@ -236,10 +244,10 @@ class YATSM(object):
                 m_1 = self.record[i]
             m_2 = self.record[i + 1]
 
-            m_1_start = date2index(self.X[:, 1], m_1['start'])
-            m_1_end = date2index(self.X[:, 1], m_1['end'])
-            m_2_start = date2index(self.X[:, 1], m_2['start'])
-            m_2_end = date2index(self.X[:, 1], m_2['end'])
+            m_1_start = date2index(self.X[:, self._jx], m_1['start'])
+            m_1_end = date2index(self.X[:, self._jx], m_1['end'])
+            m_2_start = date2index(self.X[:, self._jx], m_2['start'])
+            m_2_end = date2index(self.X[:, self._jx], m_2['end'])
 
             m_r_start = m_1_start
             m_r_end = m_2_end
@@ -306,7 +314,6 @@ class YATSM(object):
 
         return np.array(models)
 
-
     def omission_test(self, crit=0.05, behavior='ANY',
                       indices=None):
         """ Add omitted breakpoint into records based on residual stationarity
@@ -352,8 +359,9 @@ class YATSM(object):
             if r['start'] == 0 or r['end'] == 0:
                 continue
             # Find matching X and Y in data
-            index = np.where((self.X[:, 1] >= min(r['start'], r['end'])) &
-                             (self.X[:, 1] <= max(r['end'], r['start'])))[0]
+            index = np.where(
+                (self.X[:, self._jx] >= min(r['start'], r['end'])) &
+                (self.X[:, self._jx] <= max(r['end'], r['start'])))[0]
             # Grab matching X and Y
             _X = self.X[index, :]
             _Y = self.Y[:, index]
@@ -403,8 +411,9 @@ class YATSM(object):
         # Update to robust model
         for i, r in enumerate(self.record):
             # Find matching X and Y in data
-            index = np.where((self.X[:, 1] >= min(r['start'], r['end'])) &
-                             (self.X[:, 1] <= max(r['end'], r['start'])))[0]
+            index = np.where(
+                (self.X[:, self._jx] >= min(r['start'], r['end'])) &
+                (self.X[:, self._jx] <= max(r['end'], r['start'])))[0]
             # Grab matching X and Y
             _X = self.X[index, :]
             _Y = self.Y[:, index]
@@ -452,7 +461,8 @@ class YATSM(object):
     @property
     def span_time(self):
         """ Return time span (in days) between start and end of model """
-        return abs(self.X[self.here, 1] - self.X[self.start, 1])
+        return abs(self.X[self.here, self._jx] -
+                   self.X[self.start, self._jx])
 
     @property
     def span_index(self):
@@ -514,7 +524,7 @@ class YATSM(object):
             if not span:
                 span = self.consecutive * 2 + 1
 
-            mask = smooth_mask(self.X[:, 1], self.Y, span,
+            mask = smooth_mask(self.X[:, self._jx], self.Y, span,
                                crit=self.screening_crit,
                                green=self.green_band, swir1=self.swir1_band)
 
@@ -540,7 +550,8 @@ class YATSM(object):
         mask = np.ones(self.X.shape[0], dtype=np.bool)
         index = np.arange(self.start, self.here + self.consecutive,
                           dtype=np.uint16)
-        mask[index] = multitemp_mask(self.X[index, 1], self.Y[:, index],
+        mask[index] = multitemp_mask(self.X[index, self._jx],
+                                     self.Y[:, index],
                                      self.span_time / self.ndays,
                                      crit=self.screening_crit,
                                      green=self.green_band,
@@ -624,9 +635,10 @@ class YATSM(object):
 
     def update_model(self):
         # Only train if enough time has past
-        if abs(self.X[self.here, 1] - self.trained_date) > self.retrain_time:
+        if abs(self.X[self.here, self._jx] - self.trained_date) > \
+                self.retrain_time:
             self.logger.debug('Monitoring - retraining ({n} days since last)'.
-                              format(n=self.X[self.here, 1] -
+                              format(n=self.X[self.here, self._jx] -
                                      self.trained_date))
 
             # Fit timeseries models
@@ -634,17 +646,17 @@ class YATSM(object):
                                           self.Y[:, self.start:self.here + 1])
 
             # Update record
-            self.record[self.n_record]['start'] = self.X[self.start, 1]
-            self.record[self.n_record]['end'] = self.X[self.here, 1]
+            self.record[self.n_record]['start'] = self.X[self.start, self._jx]
+            self.record[self.n_record]['end'] = self.X[self.here, self._jx]
             for i, m in enumerate(self.models):
                 self.record[self.n_record]['coef'][:, i] = m.coef
                 self.record[self.n_record]['rmse'][i] = m.rmse
             self.logger.debug('Monitoring - updated ')
 
-            self.trained_date = self.X[self.here, 1]
+            self.trained_date = self.X[self.here, self._jx]
         else:
             # Update record with new end date
-            self.record[self.n_record]['end'] = self.X[self.here, 1]
+            self.record[self.n_record]['end'] = self.X[self.here, self._jx]
 
     def monitor(self):
         """ Monitor for changes in time series """
@@ -671,7 +683,8 @@ class YATSM(object):
             self.logger.debug('CHANGE DETECTED')
 
             # Record break date
-            self.record[self.n_record]['break'] = self.X[self.here + 1, 1]
+            self.record[self.n_record]['break'] = \
+                self.X[self.here + 1, self._jx]
             # Record magnitude of difference for tested indices
             self.record[self.n_record]['magnitude'][self.test_indices] = \
                 np.mean(scores, axis=0)
@@ -681,7 +694,7 @@ class YATSM(object):
 
             # Reset _X and _Y for re-training
             self._X = self.X
-            self._Y = self._Y
+            self._Y = self.Y
             self.start = self.here + 1
 
             self.trained_date = 0
@@ -757,8 +770,8 @@ class YATSM(object):
         """
         # Indices of closest observations based on DOY
         i_doy = np.argsort(np.mod(
-            self.X[self.start:self.here, 1] -
-            self.X[self.here + self.consecutive, 1],
+            self.X[self.start:self.here, self._jx] -
+            self.X[self.here + self.consecutive, self._jx],
             self.ndays))[:self.min_obs]
 
         rmse = np.zeros(len(self.test_indices), np.float32)
@@ -770,79 +783,3 @@ class YATSM(object):
                 / i_doy.size)
 
         return rmse
-
-    def monitor_plot_debug(self, index, model, i_buffer=10):
-        """ Monitoring debug plot """
-        import matplotlib.pyplot as plt
-        from utils import make_X
-        # Show before/after current timeseries
-        before_buffer = max(0, index[0] - i_buffer)
-        after_buffer = min(self.X[:, 1].size - 1, index[-1] + i_buffer)
-
-        plt.plot(self.X[before_buffer:after_buffer, 1],
-                 self.Y[4, before_buffer:after_buffer], 'ko')
-
-        pred_x = np.arange(self.X[before_buffer, 1],
-                           self.X[after_buffer, 1])
-        pred_X = make_X(pred_x).T
-        plt.plot(pred_x, model.predict(pred_X), '--', color='0.75')
-
-        # Show monitoring prediction
-        pred_x = np.arange(self.X[index[0], 1], self.X[index[-1], 1])
-        pred_X = make_X(pred_x).T
-        plt.plot(pred_x, model.predict(pred_X))
-
-        # Show currently considered obs
-        plt.plot(self.X[index, 1], self.Y[4, index], 'ro')
-
-        plt.title('Model {i} - RMSE: {rmse}'.format(i=self.n_record,
-                                                    rmse=round(model.rmse, 3)))
-
-        plt.show()
-
-    def plot(self, band, freq, ylim=None):
-        """ Plot YATSM results for a specified band
-        Args:
-            band        data band to plot
-            freq        frequency of sine/cosine (for predictions)
-            ylim        tuple for y-axes limits
-
-        """
-        from datetime import datetime as dt
-        import matplotlib.pyplot as plt
-        from utils import make_X
-
-        dates = map(dt.fromordinal, self.X[:, 1].astype(np.uint32))
-
-        # Plot data
-        plt.plot(dates, self.Y[band, :], 'ko')
-
-        if ylim:
-            plt.ylim(ylim)
-
-        # Add in lines and break points
-        for rec in self.record:
-            # Create sequence of X between start and end dates
-            if rec['start'] < rec['end']:
-                mx = np.arange(rec['start'], rec['end'])
-            elif rec['start'] > rec['end']:
-                mx = np.arange(rec['end'], rec['start'])
-            else:
-                continue
-            mdates = map(dt.fromordinal, mx)
-
-            # Predict
-            mX = make_X(mx, freq)
-            my = np.dot(rec['coef'][:, 4], mX)
-
-            # Plot prediction
-            plt.plot(mdates, my, linewidth=2)
-
-            # Plot change
-            if rec['break'] > 0:
-                i = np.where(self.X[:, 1] == rec['break'])[0]
-                plt.plot(dt.fromordinal(rec['break']),
-                         self.Y[band, i],
-                         'ro', mec='r', mfc='none', ms=10, mew=5)
-
-        plt.show()

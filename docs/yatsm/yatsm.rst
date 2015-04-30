@@ -14,13 +14,16 @@ Submodules
 
 .. toctree::
 
+   yatsm.cache
    yatsm.config_parser
-   yatsm.cymasking
    yatsm.errors
+   yatsm.log_yatsm
    yatsm.masking
+   yatsm.phenology
    yatsm.plots
    yatsm.reader
    yatsm.utils
+   yatsm.vegetation_indices
    yatsm.version
    yatsm.yatsm
 
