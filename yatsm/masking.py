@@ -3,15 +3,15 @@ from __future__ import division
 import numpy as np
 import statsmodels.api as sm
 
-from regression import robust_fit as rlm
+from .accel import try_jit
+from .regression import robust_fit as rlm
 
 ndays = 365.25
-green_band = 1
-swir1_band = 4
 
 
+@try_jit()  # np.array prevents nopython
 def multitemp_mask(x, Y, n_year, crit=400,
-                   green=green_band, swir1=swir1_band,
+                   green=1, swir1=4,
                    maxiter=10):
     """ Multi-temporal masking using RLM
 
@@ -23,39 +23,37 @@ def multitemp_mask(x, Y, n_year, crit=400,
       Y (ndarray): matrix of observed spectra
       n_year (float): "number of years to mask"
       crit (float, optional): critical value for masking clouds/shadows
-      green (int, optional): 0 indexed value for green band in Y
+      green (int, optional): 0 indexed value for green band in Y (default: 1)
       swir1 (int, optional): 0 indexed value for SWIR (~1.55-1.75um) band in Y
+        (default: 4)
       maxiter (int, optional): maximum iterations for RLM fit
 
     Returns:
       mask (ndarray): mask where False indicates values to be masked
 
     """
-    n_year = np.ceil(n_year)
+    green = Y[green, :]
+    swir1 = Y[swir1, :]
 
+    n_year = np.ceil(n_year)
     w = 2.0 * np.pi / ndays
 
-    X = np.array([
-        np.ones_like(x),
-        np.cos(w * x),
-        np.sin(w * x),
-        np.cos(w / n_year * x),
-        np.sin(w / n_year * x)
-    ])
+    X = np.array([np.ones_like(x),
+                  np.cos(w * x),
+                  np.sin(w * x),
+                  np.cos(w / n_year * x),
+                  np.sin(w / n_year * x)]).T
 
-    green_RLM = rlm.RLM(Y[green, :], X.T,
-                        M=rlm.bisquare)
-    swir1_RLM = rlm.RLM(Y[swir1, :], X.T,
-                        M=rlm.bisquare)
+    green_RLM = rlm.RLM(M=rlm.bisquare, maxiter=maxiter).fit(X, green)
+    swir1_RLM = rlm.RLM(M=rlm.bisquare, maxiter=maxiter).fit(X, swir1)
 
-    mask = ((green_RLM.fit(maxiter=maxiter).resid < crit) *
-            (swir1_RLM.fit(maxiter=maxiter).resid > -crit))
-    # train_plot_debug(x, Y, mask, swir1_RLM.fit(maxiter=maxiter).predict(X.T))
+    mask = ((green - green_RLM.predict(X) < crit) *
+            (swir1 - swir1_RLM.predict(X) > -crit))
 
     return mask
 
 
-def smooth_mask(x, Y, span, crit=400, green=green_band, swir1=swir1_band,
+def smooth_mask(x, Y, span, crit=400, green=1, swir1=4,
                 maxiter=5):
     """ Multi-temporal masking using LOWESS
 
@@ -74,8 +72,9 @@ def smooth_mask(x, Y, span, crit=400, green=green_band, swir1=swir1_band,
       Y (ndarray): matrix of observed spectra
       span (int): span of LOWESS
       crit (float, optional): critical value for masking clouds/shadows
-      green (int, optional): 0 indexed value for green band in Y
+      green (int, optional): 0 indexed value for green band in Y (default: 1)
       swir1 (int, optional): 0 indexed value for SWIR (~1.55-1.75um) band in Y
+        (default: 4)
       maxiter (int, optional): maximum increases to span when checking for
         NaN in LOWESS results
 
@@ -108,19 +107,4 @@ def smooth_mask(x, Y, span, crit=400, green=green_band, swir1=swir1_band,
     mask = (((Y[green, :] - green_lowess[:, 1]) < crit) *
             ((Y[swir1, :] - swir1_lowess[:, 1]) > -crit))
 
-#    train_plot_debug(x, Y, mask, swir1_lowess)
-#    train_plot_debug(x, Y, mask, green_lowess, band=1)
     return mask
-
-
-def train_plot_debug(x, Y, mask, fit, band=4):
-    """ Training / historical period multitemporal cloud masking debug """
-    import matplotlib.pyplot as plt
-
-    clear = np.where(mask == 1)[0]
-    cloud = np.where(mask == 0)[0]
-
-    plt.plot(x[clear], Y[band, clear], 'ko', ls='')
-    plt.plot(x[cloud], Y[band, cloud], 'rx', ls='')
-    plt.plot(fit[:, 0], fit[:, 1], 'b-')
-    plt.show()
