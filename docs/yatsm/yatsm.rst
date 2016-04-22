@@ -9,22 +9,23 @@ Subpackages
     yatsm.algorithms
     yatsm.classifiers
     yatsm.cli
+    yatsm.io
+    yatsm.mapping
+    yatsm.phenology
     yatsm.regression
-    yatsm.segment
 
 Submodules
 ----------
 
 .. toctree::
 
+   yatsm.accel
    yatsm.cache
    yatsm.config_parser
    yatsm.errors
    yatsm.log_yatsm
    yatsm.masking
-   yatsm.phenology
    yatsm.plots
-   yatsm.reader
    yatsm.utils
    yatsm.vegetation_indices
    yatsm.version

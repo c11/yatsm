@@ -26,7 +26,7 @@ def _monitor_calc_scores(X, Y, here, scores, predictions, rmse,
         for i_b, b in enumerate(test_indices):
             scores[i_b, i] = (
                 (Y[b, here + i] - predictions[i_b, i]) /
-                max(min_rmse, rmse[i_b])
+                max(min_rmse[b], rmse[i_b])
             )
 
 
@@ -37,12 +37,14 @@ class CCDCesque(YATSM):
     Classification (CCDC) algorithm by Zhu and Woodcock, 2014.
 
     Args:
-        test_indices (np.ndarray, optional): Test for changes with these
-            indices of Y. If not provided, all series in `Y` will be used as
-            test indices
-        estimator (sklearn compatible predictor): prediction model from
-            scikit-learn used to fit and predict timeseries
-        consecutive (int, optional): Consecutive observations to trigger change
+        test_indices (numpy.ndarray): Test for changes with these
+            indices of ``Y``. If not provided, all series in ``Y`` will be used
+            as test indices
+        estimator (dict): dictionary containing estimation model from
+            ``scikit-learn`` used to fit and predict timeseries and,
+            optionally, a dict of options for the estimation model ``fit``
+            method (default: ``{'object': Lasso(alpha=20), 'fit': {}}``)
+        consecutive (int): Consecutive observations to trigger change
         threshold (float): Test statistic threshold for change
         min_obs (int): Minimum observations in model
         min_rmse (float): Minimum RMSE for models during testing
@@ -50,18 +52,18 @@ class CCDCesque(YATSM):
             monitoring period
         screening (str): Style of prescreening of the timeseries for noise.
             Options are 'RLM' or 'LOWESS' (default: RLM)
-        screening_crit (float, optional): critical value for multitemporal
+        screening_crit (float): critical value for multitemporal
             noise screening (default: 400.0)
-        remove_noise (bool, optional): Remove observation if change is not
+        remove_noise (bool): Remove observation if change is not
             detected but first observation is above threshold (if it looks like
             noise) (default: True)
-        green_band (int, optional): Index of green band in Y for
+        green_band (int): Index of green band in ``Y`` for
             multitemporal masking (default: 1)
-        swir1_band (int, optional): Index of first SWIR band in Y for
+        swir1_band (int): Index of first SWIR band in ``Y`` for
             multitemporal masking (default: 4)
-        dynamic_rmse (bool, optional): Vary RMSE as a function of day of year
+        dynamic_rmse (bool): Vary RMSE as a function of day of year
             (default: False)
-        slope_test (float or bool, optional): Use an additional slope test to
+        slope_test (float or bool): Use an additional slope test to
             assess the suitability of the training period. A value of True
             enables the test and uses the `threshold` parameter as the test
             criterion. False turns off the test or a float value enables the
@@ -69,25 +71,32 @@ class CCDCesque(YATSM):
         idx_slope (int): if ``slope_test`` is enabled, provide index of ``X``
             containing slope term (default: 1)
 
+
+    .. document private functions
+    .. automethod:: _get_dynamic_rmse
+    .. automethod:: _get_model_rmse
+
     """
 
     ndays = 365.25
 
     def __init__(self,
                  test_indices=None,
-                 estimator=sklearn.linear_model.Lasso(alpha=20),
+                 estimator={'object': sklearn.linear_model.Lasso(alpha=20),
+                            'fit': {}},
                  consecutive=5, threshold=2.56, min_obs=None, min_rmse=None,
                  retrain_time=365.25, screening='RLM', screening_crit=400.0,
                  remove_noise=True, green_band=1, swir1_band=4,
-                 dynamic_rmse=False, slope_test=False, idx_slope=1):
+                 dynamic_rmse=False, slope_test=False, idx_slope=1,
+                 **kwargs):
         # Parent sets up test_indices and lm
-        super(CCDCesque, self).__init__(test_indices, estimator)
+        super(CCDCesque, self).__init__(test_indices, estimator, **kwargs)
 
         # Store model hyperparameters
         self.consecutive = consecutive
         self.threshold = threshold
         self.min_obs = min_obs or 16
-        self.min_rmse = min_rmse or sys.float_info.min
+        self.min_rmse = min_rmse
         self.retrain_time = retrain_time
 
         # Define screening method according to type
@@ -116,14 +125,14 @@ class CCDCesque(YATSM):
 
     @property
     def record_template(self):
-        """ Return a YATSM record template for features in X and series in Y
+        """ YATSM record template for features in X and series in Y
 
         Record template will set `px` and `py` if defined as class attributes.
         Otherwise `px` and `py` coordinates will default to 0.
 
         Returns:
-            np.ndarray: NumPy structured array containing a template of a YATSM
-                record
+            numpy.ndarray: NumPy structured array containing a template of a
+                YATSM record
 
         """
         record_template = np.zeros(1, dtype=[
@@ -136,8 +145,8 @@ class CCDCesque(YATSM):
             ('px', 'u2'),
             ('py', 'u2')
         ])
-        record_template['px'] = getattr(self, 'px', 0)
-        record_template['py'] = getattr(self, 'py', 0)
+        record_template['px'] = self.px
+        record_template['py'] = self.py
 
         return record_template
 
@@ -167,14 +176,14 @@ class CCDCesque(YATSM):
         """ Fit timeseries model
 
         Args:
-            X (np.ndarray): design matrix (number of observations x number of
-                features)
-            Y (np.ndarray): independent variable matrix (number of series x
+            X (numpy.ndarray): design matrix (number of observations x number
+                of features)
+            Y (numpy.ndarray): independent variable matrix (number of series x
                 number of observations)
-            dates (np.ndarray): ordinal dates for each observation in X/Y
+            dates (numpy.ndarray): ordinal dates for each observation in X/Y
 
         Returns:
-            np.ndarray: NumPy structured array containing timeseries
+            numpy.ndarray: NumPy structured array containing timeseries
                 model attribute information
 
         """
@@ -187,12 +196,19 @@ class CCDCesque(YATSM):
         self.n_features = X.shape[1]
         self.n_series = Y.shape[0]
 
+        # Setup test indices
         if not np.any(np.asarray(self.test_indices)):
             self.test_indices = np.arange(self.n_series)
+        # Setup minimum RMSE
+        if isinstance(self.min_rmse, (list, np.ndarray)):
+            self.min_rmse = np.asarray(self.min_rmse)
+        elif isinstance(self.min_rmse, (int, float)):
+            self.min_rmse = np.array([self.min_rmse] * self.n_series)
+        else:
+            self.min_rmse = np.array([sys.float_info.min] * self.n_series)
 
         # Set or reset state variables
         self.reset()
-
         if len(dates) < self.here + self.consecutive:
             raise TSLengthException('Not enough observations (n = %s)' %
                                     len(dates))
@@ -301,21 +317,18 @@ class CCDCesque(YATSM):
 
         # Test if we can still run after noise removal
         if self.here >= self._X.shape[0]:
-            # logger.debug('Not enough observations to proceed after noise '
-            #              'removal')
-            # return
             raise TSLengthException('Not enough observations to proceed '
                                     'after noise removal')
 
         # After noise removal, try to fit models
-        self._fit_models(self._X[self.start:self.here + 1, :],
-                         self._Y[:, self.start:self.here + 1],
-                         bands=self.test_indices)
+        self.fit_models(self._X[self.start:self.here + 1, :],
+                        self._Y[:, self.start:self.here + 1],
+                        bands=self.test_indices)
 
         # Ensure first and last points aren't unusual
         for i, b in enumerate(self.test_indices):
             m = self.models[b]
-            _rmse = max(self.min_rmse, m.rmse)
+            _rmse = max(self.min_rmse[b], m.rmse)
             self.start_resid[i] = (
                 np.abs(self._Y[b, self.start] -
                        m.predict(self._X[self.start, :][None, :])) /
@@ -346,7 +359,50 @@ class CCDCesque(YATSM):
         self.monitoring = True
 
     def monitor(self):
-        """ Monitor for changes in time series """
+        """ Monitor for changes in time series
+
+        The test criteria for CCDC can be represented as:
+
+        .. math::
+            \\sum_{i=0}^{\\color{red}{consec}}
+                I \\left(
+                \\sqrt{
+                    \\sum_{b\in \\color{red}{B_{test}}}
+                        \\left(
+                        \\frac
+                            {\hat\\rho_{b,i} - \\rho_{b,i}}
+                            {{RMSE}_b^{\\color{red}{*}}}
+                        \\right)
+                        ^2
+                } > \\color{red}{T_{crit}}
+                \\right)
+                > \\color{red}{consec}
+
+        where the symbols in red are model hyperparameters:
+
+            * :math:`\\color{red}{consec}`:
+              :paramref:`consecutive <.CCDCesque.consecutive>`
+            * :math:`\\color{red}{B_{test}}`:
+              :paramref:`test_indices <.CCDCesque.test_indices>`
+            * :math:`\\color{red}{T_{crit}}`:
+              :paramref:`threshold <.CCDCesque.threshold>`
+            * :math:`{RMSE}_b^{\\color{red}{*}}` depends on:
+
+                * :paramref:`dynamic_rmse <.CCDCesque.dynamic_rmse>`:
+
+                    * True: :func:`~_get_dynamic_rmse` is used for RMSE
+                    * False: :func:`~_get_model_rmse` is used for RMSE
+                * :paramref:`min_rmse <.CCDCesque.min_rmse>`
+
+                    * If a `float` or `int` is given, override RMSE estimate
+                      if estimate is smaller than
+                      :paramref:`min_rmse <.CCDCesque.min_rmse>`
+
+        If :paramref:`remove_noise <.CCDCesque.remove_noise>` is `True`,
+        the first of ``consecutive`` observations will be removed if first
+        scaled residual is above ``threshold`` but not all ``consecutive``
+        scaled residuals exceed ``threshold``.
+        """
         _rmse = self.get_rmse()
 
         for idx, model in enumerate(self.models[self.test_indices]):
@@ -406,47 +462,18 @@ class CCDCesque(YATSM):
                          str(self.dates[self.here] - self.trained_date))
 
             # Fit timeseries models
-            self._fit_models(self.X[self.start:self.here + 1, :],
-                             self.Y[:, self.start:self.here + 1])
+            self.fit_models(self.X[self.start:self.here + 1, :],
+                            self.Y[:, self.start:self.here + 1])
 
             self.trained_date = self.dates[self.here]
 
-    def _fit_models(self, X, Y, bands=None):
-        """ Fit timeseries models for `bands` within `Y` for a given `X`
-
-        Updates or initializes fit for ``self.models``
-
-        Args:
-            X (np.ndarray): design matrix (number of observations x number of
-                features)
-            Y (np.ndarray): independent variable matrix (number of series x
-                number of observations) observation in the X design matrix
-            bands (iterable): Subset of bands of `Y` to fit. If None are
-                provided, fit all bands in Y
-
-        """
-        if bands is None:
-            bands = np.arange(self.n_series)
-
-        for b in bands:
-            y = Y.take(b, axis=0)
-
-            model = self.models[b]
-            model.fit(X, y)
-
-            # Add in RMSE calculation  # TODO: numba?
-            model.rmse = rmse(y, model.predict(X))
-
-            # Add intercept to intercept term of design matrix
-            model.coef = model.coef_.copy()
-            model.coef[0] += model.intercept_
 
 # MULTITEMP SCREENING
     def _screen_timeseries_LOWESS(self, span=None):
         """ Screen entire dataset for noise before training using LOWESS
 
         Args:
-            span (int, optional): span for LOWESS
+            span (int): span for LOWESS
 
         Returns:
             bool: True if timeseries is screened and we can train, else False
@@ -522,7 +549,7 @@ class CCDCesque(YATSM):
         """ Return the normal RMSE of each fitted model
 
         Returns:
-          np.ndarray: NumPy array containing RMSE of each tested model
+          numpy.ndarray: RMSE of each tested model
 
         """
         return np.array([m.rmse for m in self.models])[self.test_indices]
@@ -537,7 +564,7 @@ class CCDCesque(YATSM):
         the signal) while decreasing omission during stable times of year.
 
         Returns:
-          np.ndarray: NumPy array containing dynamic RMSE of each tested model
+          numpy.ndarray: dynamic RMSE of each tested model
 
         """
         # Indices of closest observations based on DOY

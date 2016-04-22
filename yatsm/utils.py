@@ -3,10 +3,12 @@ from __future__ import division
 from datetime import datetime as dt
 import fnmatch
 import os
+import re
 import sys
 
 import numpy as np
 import pandas as pd
+import six
 
 try:
     from scandir import walk
@@ -21,18 +23,18 @@ def distribute_jobs(job_number, total_jobs, n, interlaced=True):
     """ Assign `job_number` out of `total_jobs` a subset of `n` tasks
 
     Args:
-      job_number (int): 0-indexed processor to distribute jobs to
-      total_jobs (int): total number of processors running jobs
-      n (int): number of tasks (e.g., lines in image, regions in segment)
-      interlaced (bool, optional): interlace job assignment (default: True)
+        job_number (int): 0-indexed processor to distribute jobs to
+        total_jobs (int): total number of processors running jobs
+        n (int): number of tasks (e.g., lines in image, regions in segment)
+        interlaced (bool, optional): interlace job assignment (default: True)
 
     Returns:
-      np.ndarray: np.ndarray of task IDs to be processed
+        np.ndarray: np.ndarray of task IDs to be processed
 
     Raises:
-      ValueError: raise error if `job_number` and `total_jobs` specified
-        result in no jobs being assinged (happens if `job_number` and
-        `total_jobs` are both 1)
+        ValueError: raise error if `job_number` and `total_jobs` specified
+            result in no jobs being assinged (happens if `job_number` and
+            `total_jobs` are both 1)
 
     """
     if interlaced:
@@ -216,7 +218,8 @@ def iter_records(records, warn_on_empty=False, yield_filename=False):
         try:
             rec = np.load(r)['record']
         except (ValueError, AssertionError, IOError) as e:
-            logger.warning('Error reading a result file (may be corrupted) (%s): %s' % (r, e.message))
+            logger.warning('Error reading a result file (may be corrupted) '
+                           '({}): {}'.format(r, str(e)))
             continue
 
         if rec.shape[0] == 0:
@@ -253,3 +256,16 @@ def is_integer(s):
         return True
     except:
         return False
+
+
+def copy_dict_filter_key(d, regex):
+    """ Copy a dict recursively, but only if key doesn't match regex pattern
+    """
+    out = {}
+    for k, v in six.iteritems(d):
+        if not re.match(regex, k):
+            if isinstance(v, dict):
+                out[k] = copy_dict_filter_key(v, regex)
+            else:
+                out[k] = v
+    return out

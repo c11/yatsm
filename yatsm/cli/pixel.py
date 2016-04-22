@@ -6,21 +6,26 @@ import re
 
 import click
 import matplotlib as mpl
+import matplotlib.cm  # noqa
 import matplotlib.pyplot as plt
 import numpy as np
-import palettable
 import patsy
 import yaml
 
-from yatsm.algorithms import postprocess  # TODO: implement postprocessors
-from yatsm.cli import options, console
-from yatsm.config_parser import convert_config, parse_config_file
-from yatsm import _cyprep as cyprep
-from yatsm.utils import csvfile_to_dataframe, get_image_IDs
-from yatsm.reader import read_pixel_timeseries
-from yatsm.regression.transforms import harm  # noqa
+from . import options, console
+from ..algorithms import postprocess
+from ..config_parser import convert_config, parse_config_file
+from ..io import read_pixel_timeseries
+from ..utils import csvfile_to_dataframe, get_image_IDs
+from ..regression.transforms import harm  # noqa
 
 avail_plots = ['TS', 'DOY', 'VAL']
+
+_DEFAULT_PLOT_CMAP = 'viridis'
+PLOT_CMAP = _DEFAULT_PLOT_CMAP
+if PLOT_CMAP not in mpl.cm.cmap_d:
+    PLOT_CMAP = 'cubehelix'
+
 
 plot_styles = []
 if hasattr(mpl, 'style'):
@@ -44,91 +49,90 @@ logger = logging.getLogger('yatsm')
 @click.option('--style', metavar='<style>', default='ggplot',
               show_default=True, type=click.Choice(plot_styles),
               help='Plot style')
-@click.option('--cmap', metavar='<cmap>', default='perceptual_rainbow_16',
-              show_default=True, help='DOY plot colormap')
+@click.option('--cmap', metavar='<cmap>', default=PLOT_CMAP,
+              show_default=True, help='DOY/VAL plot colormap')
 @click.option('--embed', is_flag=True,
               help='Drop to (I)Python interpreter at various points')
 @click.option('--seed', help='Set NumPy RNG seed value')
 @click.option('--algo_kw', multiple=True, callback=options.callback_dict,
               help='Algorithm parameter overrides')
+@click.option('--result_prefix', type=str, default='', show_default=True,
+              multiple=True,
+              help='Plot coef/rmse from refit that used this prefix')
 @click.pass_context
 def pixel(ctx, config, px, py, band, plot, ylim, style, cmap,
-          embed, seed, algo_kw):
+          embed, seed, algo_kw, result_prefix):
     # Set seed
     np.random.seed(seed)
     # Convert band to index
     band -= 1
+    # Format result prefix
+    if result_prefix:
+        result_prefix = set((_pref if _pref[-1] == '_' else _pref + '_')
+                         for _pref in result_prefix)
+        result_prefix.add('')  # add in no prefix to show original fit
+    else:
+        result_prefix = ('')
 
     # Get colormap
-    if hasattr(palettable.colorbrewer, cmap):
-        mpl_cmap = getattr(palettable.colorbrewer, cmap).mpl_colormap
-    elif hasattr(palettable.cubehelix, cmap):
-        mpl_cmap = getattr(palettable.cubehelix, cmap).mpl_colormap
-    elif hasattr(palettable.wesanderson, cmap):
-        mpl_cmap = getattr(palettable.wesanderson, cmap).mpl_colormap
-    else:
-        click.secho('Cannot find specified colormap in `palettable`', fg='red')
-        raise click.Abort()
+    if cmap not in mpl.cm.cmap_d:
+        raise click.ClickException('Cannot find specified colormap ({}) in '
+                                   'matplotlib'.format(cmap))
 
     # Parse config
     cfg = parse_config_file(config)
 
     # Apply algorithm overrides
-    revalidate = False
     for kw in algo_kw:
-        for cfg_key in cfg:
-            if kw in cfg[cfg_key]:
-                # Parse as YAML for type conversions used in config parser
-                value = yaml.load(algo_kw[kw])
-
-                print('Overriding cfg[%s][%s]=%s with %s' %
-                      (cfg_key, kw, cfg[cfg_key][kw], value))
-                cfg[cfg_key][kw] = value
-                revalidate = True
-
-    if revalidate:
+        value = yaml.load(algo_kw[kw])
+        cfg = trawl_replace_keys(cfg, kw, value)
+    if algo_kw:  # revalidate configuration
         cfg = convert_config(cfg)
 
-    # Locate and fetch attributes from data
+    # Dataset information
     df = csvfile_to_dataframe(cfg['dataset']['input_file'],
                               date_format=cfg['dataset']['date_format'])
     df['image_ID'] = get_image_IDs(df['filename'])
-
-    # Setup X/Y
     df['x'] = df['date']
-    X = patsy.dmatrix(cfg['YATSM']['design_matrix'], data=df)
-    design_info = X.design_info
+    dates = df['date'].values
 
+    # Initialize timeseries model
+    model = cfg['YATSM']['algorithm_cls']
+    algo_cfg = cfg[cfg['YATSM']['algorithm']]
+    yatsm = model(estimator=cfg['YATSM']['estimator'],
+                  **algo_cfg.get('init', {}))
+    yatsm.px = px
+    yatsm.py = py
+
+    # Setup algorithm and create design matrix (if needed)
+    X = yatsm.setup(df, **cfg)
+    design_info = getattr(X, 'design_info', None)
+
+    # Read pixel data
     Y = read_pixel_timeseries(df['filename'], px, py)
     if Y.shape[0] != cfg['dataset']['n_bands']:
-        logger.error('Number of bands in image %s (%i) do not match number '
-                     'in configuration file (%i)' %
-                     (df['filename'][0], Y.shape[0],
-                      cfg['dataset']['n_bands']))
-        raise click.Abort()
+        raise click.ClickException(
+            'Number of bands in image {f} ({nf}) do not match number in '
+            'configuration file ({nc})'.format(
+                f=df['filename'][0],
+                nf=Y.shape[0],
+                nc=cfg['dataset']['n_bands']))
 
-    # Mask out of range data
-    idx_mask = cfg['dataset']['mask_band'] - 1
-    valid = cyprep.get_valid_mask(Y,
-                                  cfg['dataset']['min_values'],
-                                  cfg['dataset']['max_values']).astype(np.bool)
-    valid *= np.in1d(Y[idx_mask, :], cfg['dataset']['mask_values'],
-                     invert=True).astype(np.bool)
+    # Preprocess pixel data
+    X, Y, dates = yatsm.preprocess(X, Y, dates, **cfg['dataset'])
 
-    # Apply mask
-    Y = np.delete(Y, idx_mask, axis=0)[:, valid]
-    X = X[valid, :]
-    dates = np.array([dt.datetime.fromordinal(d) for d in df['date'][valid]])
+    # Convert ordinal to datetime
+    dt_dates = np.array([dt.datetime.fromordinal(d) for d in dates])
 
     # Plot before fitting
     with plt.xkcd() if style == 'xkcd' else mpl.style.context(style):
         for _plot in plot:
             if _plot == 'TS':
-                plot_TS(dates, Y[band, :])
+                plot_TS(dt_dates, Y[band, :])
             elif _plot == 'DOY':
-                plot_DOY(dates, Y[band, :], mpl_cmap)
+                plot_DOY(dt_dates, Y[band, :], cmap)
             elif _plot == 'VAL':
-                plot_VAL(dates, Y[band, :], mpl_cmap)
+                plot_VAL(dt_dates, Y[band, :], cmap)
 
             if ylim:
                 plt.ylim(ylim)
@@ -137,45 +141,54 @@ def pixel(ctx, config, px, py, band, plot, ylim, style, cmap,
             plt.tight_layout()
             plt.show()
 
-    # Eliminate config parameters not algorithm and fit model
-    algo_cfg = cfg[cfg['YATSM']['algorithm']]
-    yatsm = cfg['YATSM']['algorithm_cls'](
-        estimator=cfg['YATSM']['prediction_object'],
-        **algo_cfg.get('init', {}))
-    yatsm.px = px
-    yatsm.py = py
-    yatsm.fit(X, Y, np.asarray(df['date'][valid]), **algo_cfg.get('fit', {}))
+    # Fit model
+    yatsm.fit(X, Y, dates, **algo_cfg.get('fit', {}))
+    for prefix, estimator, stay_reg, fitopt in zip(
+            cfg['YATSM']['refit']['prefix'],
+            cfg['YATSM']['refit']['prediction_object'],
+            cfg['YATSM']['refit']['stay_regularized'],
+            cfg['YATSM']['refit']['fit']):
+        yatsm.record = postprocess.refit_record(
+            yatsm, prefix, estimator,
+            fitopt=fitopt, keep_regularized=stay_reg)
 
     # Plot after predictions
     with plt.xkcd() if style == 'xkcd' else mpl.style.context(style):
-        for _plot in plot:
-            if _plot == 'TS':
-                plot_TS(dates, Y[band, :])
-            elif _plot == 'DOY':
-                plot_DOY(dates, Y[band, :], mpl_cmap)
-            elif _plot == 'VAL':
-                plot_VAL(dates, Y[band, :], mpl_cmap)
+            for _plot in plot:
+                if _plot == 'TS':
+                    plot_TS(dt_dates, Y[band, :])
+                elif _plot == 'DOY':
+                    plot_DOY(dt_dates, Y[band, :], cmap)
+                elif _plot == 'VAL':
+                    plot_VAL(dt_dates, Y[band, :], cmap)
 
-            if ylim:
-                plt.ylim(ylim)
-            plt.title('Timeseries: px={px} py={py}'.format(px=px, py=py))
-            plt.ylabel('Band {b}'.format(b=band + 1))
+                if ylim:
+                    plt.ylim(ylim)
+                plt.title('Timeseries: px={px} py={py}'.format(px=px, py=py))
+                plt.ylabel('Band {b}'.format(b=band + 1))
 
-            plot_results(band, cfg, yatsm, design_info, plot_type=_plot)
+                for _prefix in set(result_prefix):
+                    plot_results(band, cfg, yatsm, design_info,
+                                 result_prefix=_prefix,
+                                 plot_type=_plot)
 
-            plt.tight_layout()
-            plt.show()
+                plt.tight_layout()
+                plt.show()
 
     if embed:
         console.open_interpreter(
             yatsm,
             message=("Additional functions:\n"
                      "plot_TS, plot_DOY, plot_VAL, plot_results"),
+            variables={
+                'config': cfg,
+            },
             funcs={
                 'plot_TS': plot_TS, 'plot_DOY': plot_DOY,
                 'plot_VAL': plot_VAL, 'plot_results': plot_results
             }
         )
+
 
 def plot_TS(dates, y):
     """ Create a standard timeseries plot
@@ -240,16 +253,28 @@ def plot_VAL(dates, y, mpl_cmap, reps=2):
     plt.xlabel('Day of Year')
 
 
-def plot_results(band, cfg, model, design_info, plot_type='TS'):
-    """ Create a DOY plot
+def plot_results(band, cfg, model, design_info,
+                 result_prefix='', plot_type='TS'):
+    """ Plot model results
 
     Args:
         band (int): plot results for this band
         cfg (dict): YATSM configuration dictionary
         model (YATSM model): fitted YATSM timeseries model
         design_info (patsy.DesignInfo): patsy design information
+        result_prefix (str): Prefix to 'coef' and 'rmse'
         plot_type (str): type of plot to add results to (TS, DOY, or VAL)
     """
+    # Results prefix
+    result_k = model.record.dtype.names
+    coef_k = result_prefix + 'coef'
+    rmse_k = result_prefix + 'rmse'
+    if coef_k not in result_k or rmse_k not in result_k:
+        raise KeyError('Cannot find result prefix "{}" in results'
+                       .format(result_prefix))
+    if result_prefix:
+        click.echo('Using "{}" re-fitted results'.format(result_prefix))
+
     # Handle reverse
     step = -1 if cfg['YATSM']['reverse'] else 1
 
@@ -263,21 +288,22 @@ def plot_results(band, cfg, model, design_info, plot_type='TS'):
             i_coef.append(v)
     i_coef = np.asarray(i_coef)
 
+    _prefix = result_prefix or cfg['YATSM']['prediction']
     for i, r in enumerate(model.record):
-        label = 'Model {i}'.format(i=i)
+        label = 'Model {i} ({prefix})'.format(i=i, prefix=_prefix)
         if plot_type == 'TS':
             # Prediction
             mx = np.arange(r['start'], r['end'], step)
             mX = patsy.dmatrix(design, {'x': mx}).T
 
-            my = np.dot(r['coef'][i_coef, band], mX)
+            my = np.dot(r[coef_k][i_coef, band], mX)
             mx_date = np.array([dt.datetime.fromordinal(int(_x)) for _x in mx])
             # Break
             if r['break']:
                 bx = dt.datetime.fromordinal(r['break'])
                 plt.axvline(bx, c='red', lw=2)
 
-        elif plot_type == 'DOY':
+        elif plot_type in ('DOY', 'VAL'):
             yr_end = dt.datetime.fromordinal(r['end']).year
             yr_start = dt.datetime.fromordinal(r['start']).year
             yr_mid = int(yr_end - (yr_end - yr_start) / 2)
@@ -286,53 +312,32 @@ def plot_results(band, cfg, model, design_info, plot_type='TS'):
                            dt.date(yr_mid + 1, 1, 1).toordinal(), 1)
             mX = patsy.dmatrix(design, {'x': mx}).T
 
-            my = np.dot(r['coef'][i_coef, band], mX)
+            my = np.dot(r[coef_k][i_coef, band], mX)
             mx_date = np.array([dt.datetime.fromordinal(d).timetuple().tm_yday
                                 for d in mx])
 
-            label = 'Model {i} - {yr}'.format(i=i, yr=yr_mid)
+            label = 'Model {i} - {yr} ({prefix})'.format(i=i, yr=yr_mid,
+                                                         prefix=_prefix)
 
-        plt.plot(mx_date, my, lw=2, label=label)
+        plt.plot(mx_date, my, lw=3, label=label)
     leg = plt.legend()
     leg.draggable(state=True)
 
 
-def plot_lasso_debug(model):
-    """ See example:
-    http://scikit-learn.org/stable/auto_examples/linear_model/plot_lasso_model_selection.html
-    """
-    m_log_alphas = -np.log10(model.alphas_)
-    plt.plot(m_log_alphas, model.mse_path_, ':')
-    plt.plot(m_log_alphas, model.mse_path_.mean(axis=-1), 'k',
-             label='Average across the folds', linewidth=2)
-    plt.axvline(-np.log10(model.alpha_), linestyle='--', color='k',
-                label='alpha: CV estimate')
-    plt.xlabel('-log(alpha)')
-    plt.ylabel('Mean square error')
-    plt.title('Mean square error on each fold: coordinate descent')
-
-
 # UTILITY FUNCTIONS
-def type_convert(value, example):
-    """ Convert value (str) to dtype of `example`
-
-    Args:
-      value (str): string value to convert type
-      example (int, float, bool, list, tuple, np.ndarray, etc.): `value`
-        converted to type of `example` variable
-
+def trawl_replace_keys(d, key, value, s=''):
+    """ Return modified dictionary ``d``
     """
-    dtype = type(example)
-    if dtype is int:
-        return int(value)
-    elif dtype is float:
-        return float(value)
-    elif dtype in (list, tuple, np.ndarray):
-        _dtype = type(example[0])
-        return np.array([_dtype(v) for v in value.replace(',', ' ').split(' ')
-                         if v])
-    elif dtype is bool:
-        if value.lower()[0] in ('t', 'y'):
-            return True
+    md = d.copy()
+    for _key in md:
+        if isinstance(md[_key], dict):
+            # Recursively replace
+            md[_key] = trawl_replace_keys(md[_key], key, value,
+                                          s='{}[{}]'.format(s, _key))
         else:
-            return False
+            if _key == key:
+                s += '[{}]'.format(_key)
+                click.echo('Replacing d{k}={ov} with {nv}'
+                           .format(k=s, ov=md[_key], nv=value))
+                md[_key] = value
+    return md

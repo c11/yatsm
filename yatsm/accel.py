@@ -1,18 +1,39 @@
 """ Decorator ``try_jit`` accelerates computation via Numba, when available
 """
 from functools import wraps
+import logging
+import os
+
+logger = logging.getLogger('yatsm')
 
 has_numba = True
 try:
     import numba as nb
 except ImportError:
     has_numba = False
+else:
+    # Check if disabled via environment
+    if os.environ.get('NUMBA_DISABLE_JIT') == '1':
+        has_numba = False
+    # Check for an adequate version number
+    try:
+        nb_ver = nb.__version__.split('.')
+        if int(nb_ver[0]) == 0 and int(nb_ver[1]) < 22:
+            has_numba = False
+            logger.warning('You have numba installed, but the version is too '
+                           'old to be used (%s)' % nb.__version__)
+    except:
+        logger.warning('Could not parse numba version. Disabling numba.jit')
+        has_numba = False
 
 
 def _doublewrap(f):
     """ Allows decorators to be called with/without args/kwargs
 
     Allows:
+
+    .. code-block:: python
+
         @decorator
         @decorator()
         @decorator(args, kwargs=values)
@@ -43,7 +64,10 @@ def try_jit(f, *args, **kwargs):
     """ Apply numba.jit to function ``f`` if Numba is available
 
     Accepts arguments to Numba jit function (signature, nopython, etc.).
+
     Examples:
+
+    .. code-block:: python
 
         @try_jit
         @try_jit()

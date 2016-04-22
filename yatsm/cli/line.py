@@ -5,24 +5,21 @@ import time
 
 import click
 import numpy as np
-import patsy
 
-from yatsm.cache import test_cache
-from yatsm.cli import options
-from yatsm.config_parser import parse_config_file
-import yatsm._cyprep as cyprep
-from yatsm.errors import TSLengthException
-from yatsm.utils import (distribute_jobs, get_output_name, get_image_IDs,
-                         csvfile_to_dataframe)
-from yatsm.reader import get_image_attribute, read_line
-from yatsm.regression.transforms import harm
-from yatsm.algorithms import postprocess
+from . import options
+from ..cache import test_cache
+from ..config_parser import parse_config_file
+from ..errors import TSLengthException
+from ..io import get_image_attribute, mkdir_p, read_line
+from ..utils import (distribute_jobs, get_output_name, get_image_IDs,
+                     csvfile_to_dataframe, copy_dict_filter_key)
+from ..algorithms import postprocess
 try:
-    import yatsm.phenology.longtermmean as pheno
+    from ..phenology import longtermmean as pheno
 except ImportError as e:
     pheno = None
     pheno_exception = e.message
-from yatsm.version import __version__
+from ..version import __version__
 
 logger = logging.getLogger('yatsm')
 
@@ -43,73 +40,78 @@ def line(ctx, config, job_number, total_jobs,
     # Parse config
     cfg = parse_config_file(config)
 
-    if ('phenology' in cfg and cfg['phenology'].get('enable')) and not pheno:
-        click.secho('Could not import yatsm.phenology but phenology metrics '
-                    'are requested', fg='red')
-        click.secho('Error: %s' % pheno_exception, fg='red')
-        raise click.Abort()
+    if ('phenology' in cfg and cfg['phenology'].get('enable')):
+        if not pheno:
+            raise click.ClickException('Could not import yatsm.phenology but '
+                                       'phenology metrics are requested (%s)' %
+                                       pheno_exception)
+
+    logger.info('Job {i} of {n} - using config file {f}'.format(
+        i=job_number, n=total_jobs, f=config))
 
     # Make sure output directory exists and is writable
     output_dir = cfg['dataset']['output']
     try:
-        os.makedirs(output_dir)
-    except OSError as e:
-        # File exists
-        if e.errno == 17:
-            pass
-        elif e.errno == 13:
-            click.secho('Cannot create output directory %s' % output_dir,
-                        fg='red')
-            raise click.Abort()
-
+        mkdir_p(output_dir)
+    except OSError as err:
+        raise click.ClickException('Cannot create output directory %s (%s)' %
+                                   (output_dir, str(err)))
     if not os.access(output_dir, os.W_OK):
-        click.secho('Cannot write to output directory %s' % output_dir,
-                    fg='red')
-        raise click.Abort()
+        raise click.ClickException('Cannot write to output directory %s' %
+                                   output_dir)
 
     # Test existence of cache directory
     read_cache, write_cache = test_cache(cfg['dataset'])
 
-    logger.info('Job {i} of {n} - using config file {f}'.format(i=job_number,
-                                                                n=total_jobs,
-                                                                f=config))
+    # Dataset information
     df = csvfile_to_dataframe(cfg['dataset']['input_file'],
                               cfg['dataset']['date_format'])
     df['image_ID'] = get_image_IDs(df['filename'])
+    df['x'] = df['date']
+    dates = df['date'].values
 
     # Get attributes of one of the images
     nrow, ncol, nband, dtype = get_image_attribute(df['filename'][0])
     if nband != cfg['dataset']['n_bands']:
-        logger.error('Number of bands in image %s (%i) do not match number '
-                     'in configuration file (%i)' %
-                     (df['filename'][0], nband, cfg['dataset']['n_bands']))
-        raise click.Abort()
+        raise click.ClickException(
+            'Number of bands in image %s (%i) do not match number '
+            'in configuration file (%i)' %
+            (df['filename'][0], nband, cfg['dataset']['n_bands']))
 
     # Calculate the lines this job ID works on
-    job_lines = distribute_jobs(job_number, total_jobs, nrow)
+    try:
+        job_lines = distribute_jobs(job_number, total_jobs, nrow)
+    except ValueError as err:
+        raise click.ClickException(str(err))
     logger.debug('Responsible for lines: {l}'.format(l=job_lines))
 
-    # Calculate X feature input
-    df['x'] = df['date']
-    X = patsy.dmatrix(cfg['YATSM']['design_matrix'], data=df)
-    cfg['YATSM']['design'] = X.design_info.column_name_indexes
+    # Initialize timeseries model
+    model = cfg['YATSM']['algorithm_cls']
+    algo_cfg = cfg[cfg['YATSM']['algorithm']]
+    yatsm = model(estimator=cfg['YATSM']['estimator'],
+                  **algo_cfg.get('init', {}))
 
+    # Setup algorithm and create design matrix (if needed)
+    X = yatsm.setup(df, **cfg)
+    if hasattr(X, 'design_info'):
+        cfg['YATSM']['design'] = X.design_info.column_name_indexes
+    else:
+        cfg['YATSM']['design'] = {}
+
+    # Flip for reverse
     if cfg['YATSM']['reverse']:
         X = np.flipud(X)
 
     # Create output metadata to save
+    algo = cfg['YATSM']['algorithm']
     md = {
-        'YATSM': cfg['YATSM'],
-        cfg['YATSM']['algorithm']: cfg[cfg['YATSM']['algorithm']]
+        # Do not copy over prediction objects
+        # Pickled objects potentially unstable across library versions
+        'YATSM': copy_dict_filter_key(cfg['YATSM'], '.*object.*'),
+        algo: cfg[algo].copy()
     }
     if cfg['phenology']['enable']:
         md.update({'phenology': cfg['phenology']})
-
-    # Initialize timeseries model
-    cls = cfg['YATSM']['algorithm_cls']
-    algo_cfg = cfg[cfg['YATSM']['algorithm']]
-    yatsm = cls(estimator=cfg['YATSM']['prediction_object'],
-                **algo_cfg.get('init', {}))
 
     # Begin process
     start_time_all = time.time()
@@ -140,20 +142,8 @@ def line(ctx, config, job_number, total_jobs,
         output = []
         for col in np.arange(Y.shape[-1]):
             _Y = Y.take(col, axis=2)
-            # Mask
-            idx_mask = cfg['dataset']['mask_band'] - 1
-            valid = cyprep.get_valid_mask(
-                _Y,
-                cfg['dataset']['min_values'],
-                cfg['dataset']['max_values']).astype(bool)
-
-            valid *= np.in1d(_Y.take(idx_mask, axis=0),
-                             cfg['dataset']['mask_values'],
-                             invert=True).astype(np.bool)
-
-            _Y = np.delete(_Y, idx_mask, axis=0)[:, valid]
-            _X = X[valid, :]
-            _dates = df['date'].values[valid]
+            # Preprocess
+            _X, _Y, _dates = yatsm.preprocess(X, _Y, dates, **cfg['dataset'])
 
             # Run model
             yatsm.px = col
@@ -172,11 +162,14 @@ def line(ctx, config, job_number, total_jobs,
                 yatsm.record = postprocess.commission_test(
                     yatsm, cfg['YATSM']['commission_alpha'])
 
-            for prefix, estimator in zip(
+            for prefix, estimator, stay_reg, fitopt in zip(
                     cfg['YATSM']['refit']['prefix'],
-                    cfg['YATSM']['refit']['prediction_object']):
+                    cfg['YATSM']['refit']['prediction_object'],
+                    cfg['YATSM']['refit']['stay_regularized'],
+                    cfg['YATSM']['refit']['fit']):
                 yatsm.record = postprocess.refit_record(
-                    yatsm, prefix, estimator, keep_regularized=True)
+                    yatsm, prefix, estimator,
+                    fitopt=fitopt, keep_regularized=stay_reg)
 
             if cfg['phenology']['enable']:
                 pcfg = cfg['phenology']

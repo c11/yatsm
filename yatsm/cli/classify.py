@@ -2,7 +2,6 @@
 """
 from __future__ import division, print_function
 
-from datetime import datetime as dt
 import logging
 import os
 import time
@@ -10,12 +9,13 @@ import time
 import click
 import numpy as np
 import numpy.lib.recfunctions as nprfn
+import six
 from sklearn.externals import joblib
 
-from yatsm.cli import options
-from yatsm.config_parser import parse_config_file
-from yatsm.utils import distribute_jobs, get_output_name, csvfile_to_dataframe
-from yatsm.reader import get_image_attribute
+from . import options
+from ..config_parser import parse_config_file
+from ..utils import distribute_jobs, get_output_name, csvfile_to_dataframe
+from ..io import get_image_attribute
 
 logger = logging.getLogger('yatsm')
 
@@ -68,11 +68,11 @@ def try_resume(filename):
     """ Return True/False if dataset has already been classified
 
     Args:
-      filename (str): filename of the result to be checked
+        filename (str): filename of the result to be checked
 
     Returns:
-      bool: If the `npz` file exists and contains a file 'class', this test
-        will return True, else False.
+        bool: If the `npz` file exists and contains a file 'class', this test
+            will return True, else False.
 
     """
     try:
@@ -90,8 +90,8 @@ def classify_line(filename, classifier):
     """ Use `classifier` to classify data stored in `filename`
 
     Args:
-      filename (str): filename of stored results
-      classifier (sklearn classifier): pre-trained classifier
+        filename (str): filename of stored results
+        classifier (sklearn classifier): pre-trained classifier
 
     """
     z = np.load(filename)
@@ -133,7 +133,7 @@ def classify_line(filename, classifier):
 
     # Create dict for re-saving `npz` file (only way to append)
     out = {}
-    for k, v in z.iteritems():
+    for k, v in six.iteritems(z):
         out[k] = v
     out['classes'] = classes
     out['record'] = rec

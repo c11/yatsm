@@ -12,14 +12,11 @@ from osgeo import gdal
 from sklearn.cross_validation import KFold, StratifiedKFold
 from sklearn.externals import joblib
 
-from yatsm.cli import options
-from yatsm.config_parser import parse_config_file
-from yatsm import classifiers
-from yatsm.classifiers import diagnostics
-from yatsm.errors import TrainingDataException
-from yatsm import plots
-from yatsm import reader
-from yatsm import utils
+from . import options
+from ..config_parser import parse_config_file
+from ..classifiers import cfg_to_algorithm, diagnostics
+from ..errors import TrainingDataException
+from .. import io, plots, utils
 
 logger = logging.getLogger('yatsm')
 
@@ -49,7 +46,7 @@ if hasattr(plt, 'style') and 'ggplot' in plt.style.available:
 def train(ctx, config, classifier_config, model, n_fold, seed,
           plot, diagnostics, overwrite):
     """
-    Train a classifier from `scikit-learn` on YATSM output and save result to
+    Train a classifier from ``scikit-learn`` on YATSM output and save result to
     file <model>. Dataset configuration is specified by <yatsm_config> and
     classifier and classifier parameters are specified by <classifier_config>.
     """
@@ -57,20 +54,20 @@ def train(ctx, config, classifier_config, model, n_fold, seed,
     if not model.endswith('.pkl'):
         model += '.pkl'
     if os.path.isfile(model) and not overwrite:
-        logger.error('<model> exists and --overwrite was not specified')
-        raise click.Abort()
+        raise click.ClickException('<model> exists and --overwrite was not '
+                                   'specified')
 
     if seed:
         np.random.seed(seed)
 
     # Parse config & algorithm config
     cfg = parse_config_file(config)
-    algo, algo_cfg = classifiers.cfg_to_algorithm(classifier_config)
+    algo, algo_cfg = cfg_to_algorithm(classifier_config)
 
     training_image = cfg['classification']['training_image']
     if not training_image or not os.path.isfile(training_image):
-        logger.error('Training data image %s does not exist' % training_image)
-        raise click.Abort()
+        raise click.ClickException('Training data image {} does not exist'
+                                   .format(training_image))
 
     # Find information from results -- e.g., design info
     attrs = find_result_attributes(cfg)
@@ -116,9 +113,9 @@ def train(ctx, config, classifier_config, model, n_fold, seed,
         try:
             np.savez(training_cache,
                      X=X, y=y, row=row, col=col, labels=labels)
-        except:
-            logger.error('Could not save X/y to cache file')
-            raise
+        except Exception as e:
+            raise click.ClickException('Could not save X/y to cache file ({})'
+                                       .format(e))
 
     # Do modeling
     logger.info('Training classifier')
@@ -138,7 +135,7 @@ def is_cache_old(cache_file, training_file):
 
     Args:
         cache_file (str): filename of the cache file
-        training_file (str): filename of the training data file_
+        training_file (str): filename of the training data file
 
     Returns:
         bool: True if the cache file is older than the training data file
@@ -154,31 +151,33 @@ def is_cache_old(cache_file, training_file):
 def find_result_attributes(cfg):
     """ Return result attributes relevant for training a classifier
 
-    At this time, the only relevant information is the design information.
+    At this time, the only relevant information is the design information,
+    ``design (OrderedDict)`` and ``design_matrix (str)``
 
     Args:
         cfg (dict): YATSM configuration dictionary
 
     Returns:
-        dict: dictionary of result attributes. Includes 'design_info' key.
+        dict: dictionary of result attributes
 
     """
     attrs = {
-        'design_info': None
+        'design': None,
+        'design_matrix': None
     }
 
-    results = utils.find_results(cfg['dataset']['output'],
-                                 cfg['dataset']['output_prefix'] + '*')
-    for result in results:
+    for result in utils.find_results(cfg['dataset']['output'],
+                                     cfg['dataset']['output_prefix'] + '*'):
         try:
-            res = np.load(result)
-            attrs['design_info'] = res['design_matrix'].item()
+            md = np.load(result)['metadata'].item()
+            attrs['design'] = md['YATSM']['design']
+            attrs['design_matrix'] = md['YATSM']['design_matrix']
         except:
             pass
         else:
             return attrs
-    raise AttributeError('Could not find following attributes in results: %s' %
-                         attrs.keys())
+    raise AttributeError('Could not find following attributes in results: {}'
+                         .format(attrs.keys()))
 
 
 def get_training_inputs(cfg, exit_on_missing=False):
@@ -197,7 +196,7 @@ def get_training_inputs(cfg, exit_on_missing=False):
 
     """
     # Find and parse training data
-    roi = reader.read_image(cfg['classification']['training_image'])
+    roi = io.read_image(cfg['classification']['training_image'])
     logger.debug('Read in training data')
     if len(roi) == 2:
         logger.info('Found labels for ROIs -- including in output')
@@ -308,7 +307,8 @@ def algo_diagnostics(cfg, X, y,
             scores = diagnostics.kfold_scores(X, y, algo, kf)
         except Exception as e:
             logger.warning('Could not perform %s cross-validation: %s' %
-                           (kf.__class__.__name__, e.message))
+                           (kf.__class__.__name__, e))
+            return (np.nan, np.nan)
         else:
             return scores
 

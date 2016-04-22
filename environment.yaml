@@ -6,7 +6,7 @@ channels:
 dependencies:
     # Base
     - python=2.7
-    - numpy>=1.8.0
+    - numpy>=1.9.0
     - scipy>=0.14.0
     - Cython>=0.20.1
     # Statistics
@@ -15,7 +15,7 @@ dependencies:
     - pandas>=0.16.0
     - patsy>=0.3.0
     # GDAL
-    - gdal==1.11.2
+    - gdal>=2.0.0
     # CLI
     - click>=4.0
     # Config file
@@ -28,7 +28,7 @@ dependencies:
     - rpy2>=2.5.6
     - pip:
         # GLMNET (OPTIONAL)
-        - git+git://github.com/ceholden/glmnet-python.git#egg=glmnet
+        - git+git://github.com/ceholden/glmnet-python.git@v2.0.1
         # Required but missing from conda
         - palettable>=2.0.0
         - click_plugins>=1.0

@@ -4,7 +4,7 @@
 # run
 
 # Version of config
-version: "0.5.0"
+version: "0.6.0"
 
 dataset:
     # Text file containing dates and images
@@ -21,7 +21,7 @@ dataset:
     mask_band: 8
     # List of integer values to mask within the mask band
     mask_values: [2, 3, 4, 255]
-    # Valid range of non-mask band data
+    # Valid range of band data
     # specify 1 range for all bands, or specify ranges for each band
     min_values: 0
     max_values: 10000
@@ -37,13 +37,14 @@ dataset:
 YATSM:
     algorithm: "CCDCesque"
     prediction: "GLMNET_Lasso20"
-    design_matrix: "1 + x + harm(x, 1) + harm(x, 2)"
+    design_matrix: "1 + x + harm(x, 1) + harm(x, 2) + harm(x, 3)"
     reverse: False
     commission_alpha:
     # Re-fit each segment, adding new coefficients & RMSE info to record
     refit:
         prefix: [robust]
         prediction: [RLM]
+        stay_regularized: [True]
 
 # Parameters for CCDCesque algorithm -- referenced by "algorithm" key in YATSM
 CCDCesque:
@@ -62,7 +63,8 @@ CCDCesque:
 
 # Regression estimators
 LassoCV:
-    pickle: "/home/ceholden/Documents/yatsm/yatsm/regression/pickles/glmnet_LassoCV_n100.pkl"
+    pickle: "/home/ceholden/Documents/yatsm/yatsm/regression/pickles/sklearn_LassoCV_n50.pkl"
+    fit:  # optional arguments to the ``fit`` method of the predictor
 
 Lasso20:
     pickle: "/home/ceholden/Documents/yatsm/yatsm/regression/pickles/sklearn_Lasso20.pkl"
@@ -75,6 +77,9 @@ GLMNET_LassoCV:
 
 GLMNET_Lasso20:
     pickle: "/home/ceholden/Documents/yatsm/yatsm/regression/pickles/glmnet_Lasso20.pkl"
+    fit:
+        # 8 penalties for 8 coefficients
+        penalties: [1, 0, 1, 1, 1, 1, 1, 1]
 
 RLM:
     pickle: "/home/ceholden/Documents/yatsm/yatsm/regression/pickles/rlm_maxiter10.pkl"

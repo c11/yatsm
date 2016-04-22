@@ -5,7 +5,7 @@
 # character would produce a parsing error (e.g., when writing the
 # date_format, "%Y%j")
 
-version: "0.5.0"
+version: "0.6.0"
 
 dataset:
     # Text file containing dates and images
@@ -22,7 +22,7 @@ dataset:
     mask_band: 8
     # List of integer values to mask within the mask band
     mask_values: [2, 3, 4, 255]
-    # Valid range of non-mask band data
+    # Valid range of band data
     # specify 1 range for all bands, or specify ranges for each band
     min_values: 0
     max_values: 10000
@@ -45,6 +45,7 @@ YATSM:
     refit:
         prefix: [robust]
         prediction: [RLM]
+        stay_regularized: [True]
 
 # Parameters for CCDCesque algorithm -- referenced by "algorithm" key in YATSM
 CCDCesque:
@@ -63,7 +64,8 @@ CCDCesque:
 
 # Regression estimators
 LassoCV:
-    pickle: "/home/ceholden/Documents/yatsm/yatsm/regression/pickles/glmnet_LassoCV_n100.pkl"
+    pickle: "/home/ceholden/Documents/yatsm/yatsm/regression/pickles/sklearn_LassoCV_n50.pkl"
+    fit:  # optional arguments to the ``fit`` method of the predictor
 
 Lasso20:
     pickle: "/home/ceholden/Documents/yatsm/yatsm/regression/pickles/sklearn_Lasso20.pkl"
@@ -74,26 +76,33 @@ OLS:
 GLMNET_LassoCV:
     pickle: "/home/ceholden/Documents/yatsm/yatsm/regression/pickles/glmnet_LassoCV_n50.pkl"
 
+GLMNET_Lasso20:
+    pickle: "/home/ceholden/Documents/yatsm/yatsm/regression/pickles/glmnet_Lasso20.pkl"
+    fit:
+        # 4 penalties for 4 coefficients
+        penalties: [1, 0, 1, 1]
+
 RLM:
     pickle: "/home/ceholden/Documents/yatsm/yatsm/regression/pickles/rlm_maxiter10.pkl"
 
 # Section for phenology fitting
 phenology:
     enable: False
-    # Specification for dataset indices required for EVI based phenology monitoring
-    red_index: 2
-    nir_index: 3
-    blue_index: 0
-    # Scale factor for reflectance bands
-    scale: 0.0001
-    # You can also specify index of EVI if contained in dataset to override calculation
-    evi_index:
-    evi_scale:
-    # Number of years to group together when normalizing EVI to upper and lower percentiles
-    year_interval: 3
-    # Upper and lower percentiles of EVI used for max/min scaling
-    q_min: 10
-    q_max: 90
+    init:
+        # Specification for dataset indices required for EVI based phenology monitoring
+        red_index: 2
+        nir_index: 3
+        blue_index: 0
+        # Scale factor for reflectance bands
+        scale: 0.0001
+        # You can also specify index of EVI if contained in dataset to override calculation
+        evi_index:
+        evi_scale:
+        # Number of years to group together when normalizing EVI to upper and lower percentiles
+        year_interval: 3
+        # Upper and lower percentiles of EVI used for max/min scaling
+        q_min: 10
+        q_max: 90
 
 # Section for segmentation
 segment:
