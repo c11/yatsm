@@ -12,12 +12,9 @@ Run this file to test performance gains. Implementation is ~3x faster than
 statsmodels and can reach ~4x faster if Numba is available to accelerate.
 
 """
-import inspect
-
 # Don't alias to ``np`` until fix is implemented
 # https://github.com/numba/numba/issues/1559
 import numpy
-import six
 import sklearn
 
 from yatsm.accel import try_jit
@@ -46,28 +43,27 @@ def bisquare(resid, c=4.685):
 
 
 @try_jit(nopython=True)
-def mad(resid, c=0.6745):
+def mad(x, c=0.6745):
     """
-    Returns Median-Absolute-Deviation (MAD) for residuals
+    Returns Median-Absolute-Deviation (MAD) of some data
 
     Args:
-        resid (np.ndarray): residuals
+        resid (np.ndarray): Observations (e.g., residuals)
         c (float): scale factor to get to ~standard normal (default: 0.6745)
                  (i.e. 1 / 0.75iCDF ~= 1.4826 = 1 / 0.6745)
 
     Returns:
-        float: MAD 'robust' variance estimate
+        float: MAD 'robust' standard deivation  estimate
 
     Reference:
         http://en.wikipedia.org/wiki/Median_absolute_deviation
     """
     # Return median absolute deviation adjusted sigma
-    return numpy.median(numpy.fabs(resid)) / c
+    return numpy.median(numpy.fabs(x)) / c
 
 
 # UTILITY FUNCTIONS
-# np.any prevents nopython
-@try_jit()
+@try_jit(nopython=True)
 def _check_converge(x0, x, tol=1e-8):
     return not numpy.any(numpy.fabs(x0 - x > tol))
 
@@ -160,6 +156,9 @@ class RLM(sklearn.base.BaseEstimator):
         """
         self.coef_, resid = _weight_fit(X, y, numpy.ones_like(y))
         self.scale = self.scale_est(resid, c=self.scale_constant)
+
+        if self.scale < EPS:
+            return self
 
         iteration = 1
         converged = 0
